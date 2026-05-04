@@ -90,7 +90,7 @@
         <repository>
             <id>github</id>
             <name>GitHub Packages</name>
-            <url>https://maven.pkg.github.com/aspavi/aspavi-auth-lib</url>
+            <url>https://maven.pkg.github.com/vmorera/aspavi-auth-lib</url>
         </repository>
     </distributionManagement>
 
