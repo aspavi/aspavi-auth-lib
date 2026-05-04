@@ -91,7 +91,7 @@ public class AspavIAuthAutoConfiguration {
     @Bean
     @Primary
     @ConditionalOnBean({DataSource.class, EntityManagerFactory.class})
-    public TenantAwareJpaTransactionManager transactionManager(
+    public TenantAwareJpaTransactionManager tenantAwareTransactionManager(
             EntityManagerFactory entityManagerFactory,
             DataSource dataSource) {
         TenantAwareJpaTransactionManager tm = new TenantAwareJpaTransactionManager();
