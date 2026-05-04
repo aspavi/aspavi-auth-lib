@@ -1,5 +1,6 @@
 package com.aspavi.auth.config;
 
+import com.aspavi.auth.security.TenantFilter;
 import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
 import jakarta.persistence.EntityManagerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
@@ -59,10 +60,20 @@ public class AspavIAuthAutoConfiguration {
             @SuppressWarnings("unchecked")
             Collection<String> roles = (Collection<String>) realmAccess.get("roles");
             return roles.stream()
-                    .map(role -> new SimpleGrantedAuthority("ROLE_" + role))
+                    .map(SimpleGrantedAuthority::new)
                     .collect(Collectors.toList());
         });
         return jwtConverter;
+    }
+
+    // -------------------------------------------------------------------------
+    // Tenant filter — extracts tenant_id claim and stores in TenantContext
+    // -------------------------------------------------------------------------
+
+    @Bean
+    @ConditionalOnMissingBean
+    public TenantFilter tenantFilter() {
+        return new TenantFilter();
     }
 
     // -------------------------------------------------------------------------
