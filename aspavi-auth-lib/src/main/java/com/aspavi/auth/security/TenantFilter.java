@@ -25,7 +25,7 @@ import java.io.IOException;
  */
 public class TenantFilter extends OncePerRequestFilter {
 
-    private static final String TENANT_CLAIM = "tenant_id";
+    private static final String TENANT_CLAIM = AspaviClaims.TENANT_ID;
 
     @Override
     protected void doFilterInternal(HttpServletRequest request,
