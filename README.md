@@ -18,7 +18,7 @@ Both are published together with their parent POM (`com.aspavi:aspavi-auth-paren
 | `JwtDecoder` | Multi-tenant decoder that selects the right Keycloak realm based on the `iss` claim |
 | `JwtAuthenticationConverter` | Maps `realm_access.roles` to authorities as-is (no `ROLE_`/`SCOPE_` prefix) through `KeycloakRealmRoleConverter`. Null-safe; ignores non-string entries |
 | `TenantFilter` | `OncePerRequestFilter` that reads the `tenant_id` JWT claim and stores it in `TenantContext` |
-| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that executes `SET LOCAL app.current_tenant` at transaction start, enabling PostgreSQL RLS |
+| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that executes `SET LOCAL app.current_tenant` at transaction start, enabling PostgreSQL RLS. Only when JPA is on the classpath and there is an `EntityManagerFactory` |
 | `CurrentUser` | Static access to the current user: `userId()`, `tenantId()`, `employeeId()`, `requireEmployeeId()`, `hasPermission(...)` |
 | `AspaviClaims` | Claim names: `tenant_id`, `employee_id`, `realm_access`, `roles` |
 
@@ -34,7 +34,7 @@ In `pom.xml`, add the repository and the dependencies. Always use a fixed releas
 
 ```xml
 <properties>
-    <aspavi-auth.version>1.1.0</aspavi-auth.version>
+    <aspavi-auth.version>1.1.1</aspavi-auth.version>
 </properties>
 
 <repositories>
@@ -51,7 +51,8 @@ In `pom.xml`, add the repository and the dependencies. Always use a fixed releas
         <version>${aspavi-auth.version}</version>
     </dependency>
 
-    <!-- The lib's security/JPA deps are optional — bring them explicitly -->
+    <!-- The lib's security/JPA deps are optional — bring them explicitly.
+         A service without a database (e.g. iam-service) can leave JPA out (1.1.1+). -->
     <dependency>
         <groupId>org.springframework.boot</groupId>
         <artifactId>spring-boot-starter-security</artifactId>
@@ -160,6 +161,8 @@ public EmployeeResponse update(@PathVariable UUID id, @RequestBody EmployeeReque
 ```
 
 Each service keeps the constants for its own permissions; the lib does not define them. A permission change in Keycloak reaches a user when their token is refreshed.
+
+Spring Security 7 adds its own `FACTOR_BEARER` authority to every bearer-token authentication, next to the realm roles. It does not affect `hasAuthority(...)`, but a test that compares the exact list of authorities of a real request must expect it. `AspaviJwt` does not add it (it skips the authentication provider).
 
 ### 6. Identify the current user with `CurrentUser`
 

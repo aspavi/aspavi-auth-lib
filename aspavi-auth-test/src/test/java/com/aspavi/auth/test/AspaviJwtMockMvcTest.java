@@ -10,6 +10,8 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
+import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
@@ -28,6 +30,7 @@ import org.springframework.web.context.WebApplicationContext;
 import org.springframework.web.servlet.config.annotation.EnableWebMvc;
 
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
@@ -43,6 +46,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @SpringJUnitWebConfig(AspaviJwtMockMvcTest.WebConfig.class)
 class AspaviJwtMockMvcTest {
 
+    private static final String BEARER_TOKEN = "employee-read-token";
     private static final UUID EMPLOYEE = UUID.fromString("7c9e6679-7425-40de-944b-e07fc1f90ae7");
 
     @Autowired
@@ -93,6 +97,16 @@ class AspaviJwtMockMvcTest {
                 .andExpect(status().isForbidden());
     }
 
+    @Test
+    void realBearerTokenGetsRealmRolesPlusSpringSecurityFactorAuthority() throws Exception {
+        mockMvc.perform(get("/employees").header("Authorization", "Bearer " + BEARER_TOKEN))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(get("/authorities").header("Authorization", "Bearer " + BEARER_TOKEN))
+                .andExpect(status().isOk())
+                .andExpect(content().string("FACTOR_BEARER,employee:read"));
+    }
+
     @Configuration(proxyBeanMethods = false)
     @EnableWebMvc
     @EnableWebSecurity
@@ -102,7 +116,10 @@ class AspaviJwtMockMvcTest {
         @Bean
         JwtDecoder jwtDecoder() {
             return token -> {
-                throw new JwtException("Tests authenticate through AspaviJwt, not real tokens");
+                if (BEARER_TOKEN.equals(token)) {
+                    return AspaviJwt.withPermissions("employee:read").toJwt();
+                }
+                throw new JwtException("Unknown test token");
             };
         }
 
@@ -137,6 +154,14 @@ class AspaviJwtMockMvcTest {
         @PreAuthorize("hasAuthority('employee:read')")
         public String employees() {
             return "employees of " + TenantContext.getRequiredTenantId();
+        }
+
+        @GetMapping("/authorities")
+        public String authorities(Authentication authentication) {
+            return authentication.getAuthorities().stream()
+                    .map(GrantedAuthority::getAuthority)
+                    .sorted()
+                    .collect(Collectors.joining(","));
         }
 
         @GetMapping("/me")
