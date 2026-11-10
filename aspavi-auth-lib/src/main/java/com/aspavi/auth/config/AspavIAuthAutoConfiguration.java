@@ -1,5 +1,6 @@
 package com.aspavi.auth.config;
 
+import com.aspavi.auth.security.KeycloakRealmRoleConverter;
 import com.aspavi.auth.security.TenantFilter;
 import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
 import jakarta.persistence.EntityManagerFactory;
@@ -9,25 +10,25 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Primary;
-import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 
 import javax.sql.DataSource;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.stream.Collectors;
 
 /**
  * Auto-configuration for Aspavi multi-tenant JWT authentication and
  * PostgreSQL Row-Level Security support.
  *
- * <p>{@code @AutoConfiguration(after = HibernateJpaAutoConfiguration.class)} ensures
- * this runs after Spring Boot's JPA auto-config has registered the
- * {@code EntityManagerFactory}. We then replace the default
- * {@code JpaTransactionManager} with our tenant-aware subclass.
+ * <p>Runs after Spring Boot's Hibernate JPA auto-configuration so that the
+ * {@code EntityManagerFactory} is already registered when the
+ * {@code @ConditionalOnBean} of the tenant-aware transaction manager is evaluated.
+ * Spring Boot 4 moved that class to {@code org.springframework.boot.hibernate.autoconfigure};
+ * the Boot 3 name is kept so the ordering also holds there. An unknown name is ignored.
  */
-@AutoConfiguration(afterName = "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration")
+@AutoConfiguration(afterName = {
+        "org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration",
+        "org.springframework.boot.autoconfigure.orm.jpa.HibernateJpaAutoConfiguration"
+})
 @EnableConfigurationProperties(AuthProperties.class)
 public class AspavIAuthAutoConfiguration {
 
@@ -45,24 +46,17 @@ public class AspavIAuthAutoConfiguration {
     // Keycloak role mapping
     //
     // JwtGrantedAuthoritiesConverter does NOT support dot-notation paths like
-    // "realm_access.roles". We must extract the nested claim manually.
+    // "realm_access.roles". KeycloakRealmRoleConverter extracts the nested claim.
+    //
+    // Spring Security's JwtConfigurer picks this bean up from the context even when
+    // a SecurityConfig does not pass it to .jwt(...) explicitly.
     // -------------------------------------------------------------------------
 
     @Bean
     @ConditionalOnMissingBean
     public JwtAuthenticationConverter jwtAuthenticationConverter() {
         JwtAuthenticationConverter jwtConverter = new JwtAuthenticationConverter();
-        jwtConverter.setJwtGrantedAuthoritiesConverter(jwt -> {
-            var realmAccess = jwt.getClaimAsMap("realm_access");
-            if (realmAccess == null || !realmAccess.containsKey("roles")) {
-                return Collections.emptyList();
-            }
-            @SuppressWarnings("unchecked")
-            Collection<String> roles = (Collection<String>) realmAccess.get("roles");
-            return roles.stream()
-                    .map(SimpleGrantedAuthority::new)
-                    .collect(Collectors.toList());
-        });
+        jwtConverter.setJwtGrantedAuthoritiesConverter(new KeycloakRealmRoleConverter());
         return jwtConverter;
     }
 

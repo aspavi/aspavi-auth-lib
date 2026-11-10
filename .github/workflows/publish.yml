@@ -1,5 +1,12 @@
 name: Build & Publish to GitHub Packages
 
+# Versioning:
+# - pull_request          -> mvn verify, nothing is published.
+# - push to master/main   -> publishes only when the pom version is a -SNAPSHOT
+#                            (a release version on master is verified, never deployed).
+# - push of tag vX.Y.Z    -> publishes release X.Y.Z; the tag must match the pom version.
+# Release versions are immutable in GitHub Packages: never re-tag an existing version.
+
 on:
   push:
     branches: [ master, main ]
@@ -30,13 +37,39 @@ jobs:
           server-username: GITHUB_ACTOR
           server-password: GITHUB_TOKEN
 
-      - name: Build, test & publish
+      - name: Decide whether to publish
+        id: plan
         run: |
+          VERSION=$(mvn --batch-mode --quiet help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "Project version: $VERSION"
+          PUBLISH=false
           if [ "${{ github.event_name }}" = "push" ]; then
-            mvn --batch-mode deploy
-          else
-            mvn --batch-mode verify
+            if [ "${{ github.ref_type }}" = "tag" ]; then
+              TAG="${{ github.ref_name }}"
+              if [ "$TAG" != "v$VERSION" ]; then
+                echo "::error::Tag $TAG does not match pom version $VERSION (expected v$VERSION)"
+                exit 1
+              fi
+              case "$VERSION" in
+                *-SNAPSHOT) echo "::error::Tag $TAG points to a SNAPSHOT version"; exit 1 ;;
+              esac
+              PUBLISH=true
+            else
+              case "$VERSION" in
+                *-SNAPSHOT) PUBLISH=true ;;
+                *) echo "Release version $VERSION on a branch: verify only, publish it by pushing tag v$VERSION" ;;
+              esac
+            fi
           fi
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+
+      - name: Build & test
+        if: steps.plan.outputs.publish != 'true'
+        run: mvn --batch-mode verify
+
+      - name: Build, test & publish
+        if: steps.plan.outputs.publish == 'true'
+        run: mvn --batch-mode deploy
         env:
           GITHUB_ACTOR: ${{ github.actor }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
