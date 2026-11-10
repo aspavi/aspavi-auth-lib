@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
+import org.springframework.boot.test.context.FilteredClassLoader;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -81,6 +82,18 @@ class AspavIAuthAutoConfigurationTest {
                     assertThat(context).hasSingleBean(TenantAwareJpaTransactionManager.class);
                     assertThat(context.getBean(PlatformTransactionManager.class))
                             .isInstanceOf(TenantAwareJpaTransactionManager.class);
+                });
+    }
+
+    @Test
+    void startsWithoutJpaOnTheClasspath() {
+        runner.withClassLoader(new FilteredClassLoader("jakarta.persistence.", "org.springframework.orm."))
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context).hasSingleBean(JwtDecoder.class);
+                    assertThat(context).hasSingleBean(JwtAuthenticationConverter.class);
+                    assertThat(context).hasSingleBean(TenantFilter.class);
+                    assertThat(context).doesNotHaveBean("tenantAwareTransactionManager");
                 });
     }
 

@@ -6,9 +6,11 @@ import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
 import jakarta.persistence.EntityManagerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
@@ -80,17 +82,30 @@ public class AspavIAuthAutoConfiguration {
     // @Primary ensures this bean wins over the default one registered by
     // HibernateJpaAutoConfiguration. No @ConditionalOnMissingBean here —
     // we always want our implementation to be active.
+    //
+    // It lives in a nested configuration guarded by @ConditionalOnClass so that a
+    // service without JPA on the classpath (no database) still starts: Spring
+    // introspects the @Bean method signatures of a configuration class, and
+    // EntityManagerFactory / JpaTransactionManager must not appear in the outer one.
     // -------------------------------------------------------------------------
 
-    @Bean
-    @Primary
-    @ConditionalOnBean({DataSource.class, EntityManagerFactory.class})
-    public TenantAwareJpaTransactionManager tenantAwareTransactionManager(
-            EntityManagerFactory entityManagerFactory,
-            DataSource dataSource) {
-        TenantAwareJpaTransactionManager tm = new TenantAwareJpaTransactionManager();
-        tm.setEntityManagerFactory(entityManagerFactory);
-        tm.setDataSource(dataSource);
-        return tm;
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = {
+            "jakarta.persistence.EntityManagerFactory",
+            "org.springframework.orm.jpa.JpaTransactionManager"
+    })
+    static class TenantAwareTransactionManagerConfiguration {
+
+        @Bean
+        @Primary
+        @ConditionalOnBean({DataSource.class, EntityManagerFactory.class})
+        public TenantAwareJpaTransactionManager tenantAwareTransactionManager(
+                EntityManagerFactory entityManagerFactory,
+                DataSource dataSource) {
+            TenantAwareJpaTransactionManager tm = new TenantAwareJpaTransactionManager();
+            tm.setEntityManagerFactory(entityManagerFactory);
+            tm.setDataSource(dataSource);
+            return tm;
+        }
     }
 }

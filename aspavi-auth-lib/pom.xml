@@ -8,7 +8,7 @@
     <parent>
         <groupId>com.aspavi</groupId>
         <artifactId>aspavi-auth-parent</artifactId>
-        <version>1.2.0-SNAPSHOT</version>
+        <version>1.1.1</version>
     </parent>
 
     <artifactId>aspavi-auth-lib</artifactId>
@@ -74,4 +74,48 @@
             <scope>test</scope>
         </dependency>
     </dependencies>
+
+    <build>
+        <plugins>
+            <!--
+              NoJpaClasspathTest needs a classpath without JPA, like a service without a database.
+              It runs in its own execution with those artifacts removed; the default one skips it.
+            -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-surefire-plugin</artifactId>
+                <executions>
+                    <execution>
+                        <id>default-test</id>
+                        <configuration>
+                            <excludes>
+                                <exclude>**/NoJpaClasspathTest.java</exclude>
+                            </excludes>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>no-jpa-classpath</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <includes>
+                                <include>**/NoJpaClasspathTest.java</include>
+                            </includes>
+                            <classpathDependencyExcludes>
+                                <classpathDependencyExclude>jakarta.persistence:jakarta.persistence-api</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.springframework:spring-orm</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.hibernate.orm:hibernate-core</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.springframework.data:spring-data-jpa</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.springframework.boot:spring-boot-data-jpa</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.springframework.boot:spring-boot-jpa</classpathDependencyExclude>
+                                <classpathDependencyExclude>org.springframework.boot:spring-boot-hibernate</classpathDependencyExclude>
+                                <classpathDependencyExclude>com.h2database:h2</classpathDependencyExclude>
+                            </classpathDependencyExcludes>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
 </project>
