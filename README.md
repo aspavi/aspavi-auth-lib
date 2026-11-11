@@ -88,7 +88,7 @@ aspavi:
       test: ${KEYCLOAK_BASE_URL:https://keycloak.aspavi.com}/realms/rrhh-tenant-test
 ```
 
-Each key is the `tenant_id` claim value that Keycloak includes in the JWT. The value is the issuer URI used for OIDC discovery. Add new tenants here and redeploy — no code changes needed.
+Each key is the `tenant_id` claim value that Keycloak includes in the JWT. The value is the issuer URI used for OIDC discovery. Add new tenants here and redeploy — no code changes needed. The value must equal the `iss` of the tokens exactly; see [Issuers and the local environment](#issuers-and-the-local-environment).
 
 ### 3. Write a `SecurityConfig`
 
@@ -292,6 +292,62 @@ void clearTenant() {
     TenantContext.clear();
 }
 ```
+
+---
+
+## Issuers and the local environment
+
+### How the issuer is validated
+
+- `aspavi.auth.tenants` maps each tenant to **one** issuer. The `iss` claim of the token must match that value exactly (scheme, host, port and path); otherwise the request gets 401 (`Unknown or missing issuer in token`).
+- For each issuer, `MultiTenantJwtDecoder` uses `NimbusJwtDecoder.withIssuerLocation(issuer)`. On the first token it calls `<issuer>/.well-known/openid-configuration`, checks that the `issuer` in that document equals the configured one, and then fetches the signing keys from the `jwks_uri` the document returns.
+- So the configured issuer must be the exact `iss` of the tokens **and** reachable, together with its `jwks_uri`, from wherever the service runs. Listing several issuers per tenant would not change this: the discovery URL and the keys URL come from the issuer.
+
+### aspavi-local (the local Docker environment)
+
+- Keycloak runs with `KC_HOSTNAME=http://keycloak:8080`. Every token, and every URL in its discovery document (`issuer`, `jwks_uri`, `token_endpoint`), uses `http://keycloak:8080`, even when it is requested through the published port `localhost:8180`.
+- The services run inside the Docker network with the `aspavi` profile and `KEYCLOAK_BASE_URL=http://keycloak:8080`, so `${KEYCLOAK_BASE_URL}/realms/rrhh-tenant-<x>` matches the tokens and resolves. This works.
+- A service started on the host with the `local` profile does **not** work against aspavi-local: its issuer is `http://localhost:8180/...`, the tokens say `http://keycloak:8080/...`, and `keycloak` does not resolve on the host.
+
+### The `local` profile (`localhost:8180`)
+
+The `http://localhost:8180/realms/rrhh-tenant-<x>` issuers in `application.yml` and `application-local.yml` only match the Keycloak of the service's own `docker-compose.yml` (employee-service and organization-service have one). That Keycloak listens on 8180 without `KC_HOSTNAME`, so the tokens it issues on the host say `http://localhost:8180/...`.
+
+### Testing a new jar against aspavi-local
+
+Run the service in its container and mount the new jar with a compose override kept **outside** the aspavi-local compose. The network, the `keycloak` alias, the environment variables and the port come from the base compose; only the jar changes. Example from `local-overrides/employee/` in the workspace root:
+
+```yaml
+# local-overrides/employee/docker-compose.override.yml
+services:
+  employee:
+    volumes: !override
+      - <workspace>/local-overrides/employee/employee.jar:/app/app.jar:ro
+```
+
+```bash
+ASPAVI_ROOT=<workspace> docker compose -p aspavi-local \
+  -f <workspace>/aspavi-harness/entorno-local/docker-compose.yml \
+  -f <workspace>/local-overrides/employee/docker-compose.override.yml \
+  up -d --no-deps --force-recreate employee
+```
+
+`--no-deps` leaves the other containers alone. Do not recreate the `keycloak` container: it runs `start-dev` without a data volume, so a new container goes back to the imported realms and loses the roles and assignments made since.
+
+### Possible improvement: debugging from the IDE against aspavi-local
+
+Not implemented. A backward-compatible option (it would be 1.2.0) is an optional `aspavi.auth.jwk-set-uris.<tenant>`. For a tenant that sets it, the decoder would skip discovery, fetch the keys from that URI and still require the exact `iss` of `aspavi.auth.tenants`:
+
+```yaml
+aspavi:
+  auth:
+    tenants:
+      test: http://keycloak:8080/realms/rrhh-tenant-test
+    jwk-set-uris:
+      test: http://localhost:8180/realms/rrhh-tenant-test/protocol/openid-connect/certs
+```
+
+Services would need to move to that version and change their `application-local.yml`; iam-service would also need `KEYCLOAK_ADMIN_BASE_URL=http://localhost:8180`.
 
 ---
 
