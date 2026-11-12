@@ -1,122 +1,155 @@
 package com.aspavi.auth.config;
 
+import com.aspavi.auth.config.IssuerDiscovery.UnknownIssuerException;
+import com.aspavi.auth.tenant.TenantIssuers;
+import com.nimbusds.jwt.JWT;
+import com.nimbusds.jwt.JWTClaimsSet;
+import com.nimbusds.jwt.JWTParser;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.springframework.security.oauth2.jwt.BadJwtException;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.jwt.JwtException;
-import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
+import java.text.ParseException;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
+import java.util.Objects;
+import java.util.function.Function;
 
 /**
- * A composite {@link JwtDecoder} that selects the correct per-tenant decoder
- * based on the {@code iss} (issuer) claim found in the unverified JWT payload.
+ * A {@link JwtDecoder} for many Keycloak realms, one per tenant.
  *
- * <p>Decoders are created lazily and cached for reuse. Each tenant decoder is
- * configured from its Keycloak issuer URI via OIDC discovery.
+ * <p>The {@code iss} claim is read from the token <em>without</em> verifying it, only to choose the
+ * decoder: an issuer that is neither in {@code aspavi.auth.tenants} nor matches
+ * {@code aspavi.auth.issuer-pattern} is rejected with no network request. For an accepted issuer,
+ * the decoder is built on first use (OpenID discovery of that issuer, then its JWKS), and it checks
+ * the signature with that realm's keys and requires {@code iss} to equal the issuer.
  *
- * <p>The issuer is extracted from the raw token <em>before</em> signature verification
- * so we can route the token to the correct decoder. The actual cryptographic
- * validation is always delegated to {@link NimbusJwtDecoder}.
+ * <p>Built decoders are kept in an LRU cache of bounded size. An issuer whose realm does not exist
+ * is remembered for {@code unknownIssuerTtl}, so a made-up {@code iss} that fits the pattern does not
+ * reach Keycloak on every request. Errors that may be transient (Keycloak unreachable, 5xx) are not
+ * remembered.
  */
 public class MultiTenantJwtDecoder implements JwtDecoder {
 
-    /** Pre-configured map of issuer URI → tenant id (from AuthProperties). */
-    private final Map<String, String> issuerToTenant;
+    static final int DEFAULT_MAX_DECODERS = 100;
+    static final Duration DEFAULT_UNKNOWN_ISSUER_TTL = Duration.ofMinutes(5);
+    static final Duration DISCOVERY_TIMEOUT = Duration.ofSeconds(5);
+    /** Bound of the unknown-issuer cache, so that random issuers cannot grow it without limit. */
+    static final int MAX_UNKNOWN_ISSUERS = 1_000;
 
-    /** Pre-configured map of tenant id → issuer URI (from AuthProperties). */
-    private final Map<String, String> tenantToIssuer;
+    private static final Log log = LogFactory.getLog(MultiTenantJwtDecoder.class);
 
-    /** Lazily-initialised decoders, keyed by issuer URI. */
-    private final ConcurrentHashMap<String, JwtDecoder> decoderCache = new ConcurrentHashMap<>();
+    private final TenantIssuers issuers;
+    private final Function<String, JwtDecoder> decoderFactory;
+    private final Clock clock;
+    private final Duration unknownIssuerTtl;
+    private final Object lock = new Object();
+    private final Map<String, JwtDecoder> decoders;
+    private final Map<String, Instant> unknownIssuers;
 
+    /** Fixed tenant → issuer map, default cache settings. */
     public MultiTenantJwtDecoder(Map<String, String> tenants) {
-        this.tenantToIssuer = Map.copyOf(tenants);
-        Map<String, String> reverse = new ConcurrentHashMap<>();
-        tenants.forEach((tenant, issuer) -> reverse.put(issuer, tenant));
-        this.issuerToTenant = Map.copyOf(reverse);
+        this(TenantIssuers.of(tenants, null), DEFAULT_MAX_DECODERS, DEFAULT_UNKNOWN_ISSUER_TTL);
+    }
+
+    public MultiTenantJwtDecoder(TenantIssuers issuers, int maxDecoders, Duration unknownIssuerTtl) {
+        this(issuers, maxDecoders, unknownIssuerTtl, new IssuerDiscovery(DISCOVERY_TIMEOUT), Clock.systemUTC());
+    }
+
+    MultiTenantJwtDecoder(TenantIssuers issuers,
+                          int maxDecoders,
+                          Duration unknownIssuerTtl,
+                          Function<String, JwtDecoder> decoderFactory,
+                          Clock clock) {
+        if (maxDecoders < 1) {
+            throw new IllegalArgumentException("aspavi.auth.issuer-cache.max-size must be at least 1");
+        }
+        if (unknownIssuerTtl == null || unknownIssuerTtl.isNegative()) {
+            throw new IllegalArgumentException("aspavi.auth.issuer-cache.unknown-issuer-ttl must not be negative");
+        }
+        this.issuers = Objects.requireNonNull(issuers, "issuers");
+        this.decoderFactory = Objects.requireNonNull(decoderFactory, "decoderFactory");
+        this.clock = Objects.requireNonNull(clock, "clock");
+        this.unknownIssuerTtl = unknownIssuerTtl;
+        this.decoders = lruMap(maxDecoders, true);
+        this.unknownIssuers = lruMap(MAX_UNKNOWN_ISSUERS, false);
     }
 
     @Override
     public Jwt decode(String token) throws JwtException {
-        String issuer = extractIssuerUnchecked(token);
-        if (issuer == null || !issuerToTenant.containsKey(issuer)) {
-            throw new JwtException("Unknown or missing issuer in token: " + issuer);
+        String issuer = readIssuerUnverified(token);
+        if (issuers.tenantFor(issuer).isEmpty()) {
+            throw new BadJwtException("Unknown or missing issuer in token");
         }
-        return decoderCache
-                .computeIfAbsent(issuer, this::buildDecoder)
-                .decode(token);
+        return decoderFor(issuer).decode(token);
     }
 
-    // -------------------------------------------------------------------------
-    // helpers
-    // -------------------------------------------------------------------------
+    private JwtDecoder decoderFor(String issuer) {
+        synchronized (lock) {
+            JwtDecoder cached = decoders.get(issuer);
+            if (cached != null) {
+                return cached;
+            }
+            Instant rejectedUntil = unknownIssuers.get(issuer);
+            if (rejectedUntil != null) {
+                if (clock.instant().isBefore(rejectedUntil)) {
+                    throw new BadJwtException("Unknown issuer: realm not found");
+                }
+                unknownIssuers.remove(issuer);
+            }
+        }
 
-    /**
-     * Extracts the {@code iss} claim from the JWT payload without verifying the
-     * signature. Uses standard library JSON parsing via a simple key scan to avoid
-     * pulling in an extra JSON dependency.
-     *
-     * <p>Real signature verification is always performed by the per-tenant
-     * {@link NimbusJwtDecoder}.
-     */
-    private String extractIssuerUnchecked(String token) {
+        // Outside the lock: discovery is a network call. Two first requests for the same issuer
+        // may both discover it; the first decoder stored wins.
+        JwtDecoder created;
         try {
-            String[] parts = token.split("\\.");
-            if (parts.length < 2) {
-                return null;
+            created = decoderFactory.apply(issuer);
+        } catch (UnknownIssuerException e) {
+            synchronized (lock) {
+                unknownIssuers.put(issuer, clock.instant().plus(unknownIssuerTtl));
             }
+            log.warn("Rejecting tokens of issuer " + printable(issuer) + " for " + unknownIssuerTtl + ": " + e.getMessage());
+            throw new BadJwtException("Unknown issuer: " + e.getMessage(), e);
+        }
 
-            byte[] payloadBytes = Base64.getUrlDecoder().decode(padBase64(parts[1]));
-            String payloadJson = new String(payloadBytes, StandardCharsets.UTF_8);
-
-            // Locate the "iss" key and extract its string value.
-            // Handles standard compact JWT payloads produced by Keycloak.
-            int keyIdx = payloadJson.indexOf("\"iss\"");
-            if (keyIdx == -1) {
-                return null;
-            }
-            int colon = payloadJson.indexOf(':', keyIdx + 5);
-            if (colon == -1) {
-                return null;
-            }
-            // Skip optional whitespace after the colon
-            int valueStart = colon + 1;
-            while (valueStart < payloadJson.length() && payloadJson.charAt(valueStart) != '"') {
-                valueStart++;
-            }
-            if (valueStart >= payloadJson.length()) {
-                return null;
-            }
-            // valueStart points to the opening quote; find the closing one
-            int contentStart = valueStart + 1;
-            int contentEnd = payloadJson.indexOf('"', contentStart);
-            if (contentEnd == -1) {
-                return null;
-            }
-            return payloadJson.substring(contentStart, contentEnd);
-
-        } catch (IllegalArgumentException e) {
-            // Base64 decoding failed — malformed token
-            return null;
+        synchronized (lock) {
+            JwtDecoder raced = decoders.putIfAbsent(issuer, created);
+            return raced != null ? raced : created;
         }
     }
 
     /**
-     * Adds Base64 padding characters so that {@link Base64#getUrlDecoder()} can
-     * decode JWT segments, which are unpadded by the JWT spec.
+     * Reads {@code iss} without checking the signature. Its only use is to pick a decoder; the
+     * decoder then verifies the signature with the keys of that issuer.
      */
-    private String padBase64(String base64url) {
-        return switch (base64url.length() % 4) {
-            case 2 -> base64url + "==";
-            case 3 -> base64url + "=";
-            default -> base64url;
-        };
+    private static String readIssuerUnverified(String token) {
+        try {
+            JWT jwt = JWTParser.parse(token);
+            JWTClaimsSet claims = jwt.getJWTClaimsSet();
+            return claims == null ? null : claims.getIssuer();
+        } catch (ParseException | RuntimeException e) {
+            throw new BadJwtException("Malformed token", e);
+        }
     }
 
-    private JwtDecoder buildDecoder(String issuerUri) {
-        return NimbusJwtDecoder.withIssuerLocation(issuerUri).build();
+    /** For logs: the issuer comes from an unverified token, so keep it short and on one line. */
+    private static String printable(String issuer) {
+        String oneLine = issuer.replaceAll("\\p{Cntrl}", "?");
+        return oneLine.length() > 200 ? oneLine.substring(0, 200) + "..." : oneLine;
+    }
+
+    private static <V> Map<String, V> lruMap(int maxSize, boolean accessOrder) {
+        return new LinkedHashMap<>(16, 0.75f, accessOrder) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, V> eldest) {
+                return size() > maxSize;
+            }
+        };
     }
 }

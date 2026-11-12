@@ -36,20 +36,23 @@ import java.util.UUID;
  *     .andExpect(status().isOk());
  * }</pre>
  *
- * <p>Defaults: tenant {@value #DEFAULT_TENANT_ID}, subject {@value #DEFAULT_SUBJECT}, no
- * {@code employee_id}. Use {@link #toAuthentication()} or {@link #authenticate()} outside
+ * <p>Defaults: tenant {@value #DEFAULT_TENANT_ID} (issuer {@code https://keycloak.test/realms/rrhh-tenant-test}),
+ * subject {@value #DEFAULT_SUBJECT}, no {@code employee_id}. Use {@link #toAuthentication()} or {@link #authenticate()} outside
  * MockMvc (e.g. to test a service that calls {@code CurrentUser}).
  */
 public final class AspaviJwt implements RequestPostProcessor {
 
     public static final String DEFAULT_TENANT_ID = "test";
     public static final String DEFAULT_SUBJECT = "test-user";
-    public static final String DEFAULT_ISSUER = "https://keycloak.test/realms/rrhh-tenant-test";
+    /** Base of the issuers of test tokens: the issuer is this plus {@code rrhh-tenant-<tenant>}. */
+    public static final String ISSUER_BASE = "https://keycloak.test/realms/";
+    public static final String DEFAULT_ISSUER = ISSUER_BASE + "rrhh-tenant-" + DEFAULT_TENANT_ID;
 
     private final List<String> permissions;
     private String tenantId = DEFAULT_TENANT_ID;
     private String subject = DEFAULT_SUBJECT;
     private UUID employeeId;
+    private String issuer;
     private final Map<String, Object> extraClaims = new LinkedHashMap<>();
 
     private AspaviJwt(List<String> permissions) {
@@ -66,10 +69,28 @@ public final class AspaviJwt implements RequestPostProcessor {
         return new AspaviJwt(new ArrayList<>(Arrays.asList(permissions)));
     }
 
-    /** Sets the {@code tenant_id} claim (default {@value #DEFAULT_TENANT_ID}). */
+    /**
+     * Sets the tenant (default {@value #DEFAULT_TENANT_ID}): the {@code tenant_id} claim and, unless
+     * {@link #issuer(String)} is set, the issuer {@code https://keycloak.test/realms/rrhh-tenant-<tenant>},
+     * because {@code TenantFilter} requires both to name the same tenant.
+     */
     public AspaviJwt tenantId(String tenantId) {
         this.tenantId = Objects.requireNonNull(tenantId, "tenantId");
         return this;
+    }
+
+    /**
+     * Sets the {@code iss} claim (default {@link #issuerFor(String) issuerFor(tenantId)}), e.g. to test a
+     * token whose {@code tenant_id} does not match its realm.
+     */
+    public AspaviJwt issuer(String issuer) {
+        this.issuer = Objects.requireNonNull(issuer, "issuer");
+        return this;
+    }
+
+    /** The default issuer of a test token of {@code tenantId}. */
+    public static String issuerFor(String tenantId) {
+        return ISSUER_BASE + "rrhh-tenant-" + tenantId;
     }
 
     /** Sets the {@code sub} claim, the Keycloak user id (default {@value #DEFAULT_SUBJECT}). */
@@ -95,7 +116,7 @@ public final class AspaviJwt implements RequestPostProcessor {
         Instant now = Instant.now();
         Jwt.Builder builder = Jwt.withTokenValue("aspavi-test-token")
                 .header("alg", "none")
-                .issuer(DEFAULT_ISSUER)
+                .issuer(issuer != null ? issuer : issuerFor(tenantId))
                 .subject(subject)
                 .issuedAt(now)
                 .expiresAt(now.plusSeconds(300))

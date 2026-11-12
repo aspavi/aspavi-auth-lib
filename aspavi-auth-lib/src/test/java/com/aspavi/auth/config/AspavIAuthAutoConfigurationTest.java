@@ -2,6 +2,7 @@ package com.aspavi.auth.config;
 
 import com.aspavi.auth.security.TenantFilter;
 import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
+import com.aspavi.auth.tenant.TenantIssuers;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
 import org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration;
@@ -16,6 +17,7 @@ import org.springframework.security.oauth2.jwt.JwtDecoder;
 import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.transaction.PlatformTransactionManager;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
@@ -35,6 +37,7 @@ class AspavIAuthAutoConfigurationTest {
             assertThat(context.getBean(JwtDecoder.class)).isInstanceOf(MultiTenantJwtDecoder.class);
             assertThat(context).hasSingleBean(JwtAuthenticationConverter.class);
             assertThat(context).hasSingleBean(TenantFilter.class);
+            assertThat(context).hasSingleBean(TenantIssuers.class);
         });
     }
 
@@ -65,6 +68,53 @@ class AspavIAuthAutoConfigurationTest {
             assertThat(context.getBean(JwtAuthenticationConverter.class))
                     .isSameAs(CustomConverterConfig.CUSTOM);
         });
+    }
+
+    @Test
+    void tenantIssuersComeFromTheMapAndThePattern() {
+        runner.withPropertyValues("aspavi.auth.issuer-pattern=https://kc.example.com/realms/rrhh-tenant-{tenant}")
+                .run(context -> {
+                    TenantIssuers issuers = context.getBean(TenantIssuers.class);
+                    assertThat(issuers.tenantFor("https://kc.example.com/realms/rrhh-tenant-acme")).contains("acme");
+                    assertThat(issuers.tenantFor("https://kc.example.com/realms/rrhh-tenant-brand-new")).contains("brand-new");
+                    assertThat(issuers.tenantFor("https://kc.example.com/realms/master")).isEmpty();
+                });
+    }
+
+    @Test
+    void worksWithOnlyTheMap() {
+        runner.run(context -> {
+            TenantIssuers issuers = context.getBean(TenantIssuers.class);
+            assertThat(issuers.issuerPattern()).isNull();
+            assertThat(issuers.tenantFor("https://kc.example.com/realms/rrhh-tenant-acme")).contains("acme");
+            assertThat(issuers.tenantFor("https://kc.example.com/realms/rrhh-tenant-other")).isEmpty();
+        });
+    }
+
+    @Test
+    void failsToStartWithAPatternWithoutPlaceholder() {
+        runner.withPropertyValues("aspavi.auth.issuer-pattern=https://kc.example.com/realms/rrhh-tenant-acme")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().rootCause().hasMessageContaining("{tenant}"));
+    }
+
+    @Test
+    void bindsTheCacheSettings() {
+        runner.withPropertyValues(
+                        "aspavi.auth.issuer-cache.max-size=7",
+                        "aspavi.auth.issuer-cache.unknown-issuer-ttl=30s")
+                .run(context -> {
+                    AuthProperties properties = context.getBean(AuthProperties.class);
+                    assertThat(properties.getIssuerCache().getMaxSize()).isEqualTo(7);
+                    assertThat(properties.getIssuerCache().getUnknownIssuerTtl()).isEqualTo(Duration.ofSeconds(30));
+                });
+    }
+
+    @Test
+    void failsToStartWithAnEmptyDecoderCache() {
+        runner.withPropertyValues("aspavi.auth.issuer-cache.max-size=0")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().rootCause().hasMessageContaining("max-size"));
     }
 
     @Test

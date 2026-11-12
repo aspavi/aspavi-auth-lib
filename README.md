@@ -6,7 +6,7 @@ The repository builds two artifacts:
 
 | Artifact | Scope in a service | Contents |
 |----------|--------------------|----------|
-| `com.aspavi:aspavi-auth-lib` | compile | Auto-configuration, `CurrentUser`, `TenantContext`, `TenantFilter` |
+| `com.aspavi:aspavi-auth-lib` | compile | Auto-configuration, `CurrentUser`, `TenantContext`, `TenantIssuers`, `TenantFilter` |
 | `com.aspavi:aspavi-auth-test` | test | `AspaviJwt`, to authenticate MockMvc requests and tests like production does |
 
 Both are published together with their parent POM (`com.aspavi:aspavi-auth-parent`) under the same version.
@@ -15,9 +15,10 @@ Both are published together with their parent POM (`com.aspavi:aspavi-auth-paren
 
 | Bean / class | Description |
 |--------------|-------------|
-| `JwtDecoder` | Multi-tenant decoder that selects the right Keycloak realm based on the `iss` claim |
+| `TenantIssuers` | Which issuers belong to which tenant: the `aspavi.auth.tenants` map and/or the `aspavi.auth.issuer-pattern` |
+| `JwtDecoder` | Multi-tenant decoder: accepts only the issuers of `TenantIssuers`, discovers each realm's keys on first use and caches them (bounded, with a negative cache for realms that do not exist) |
 | `JwtAuthenticationConverter` | Maps `realm_access.roles` to authorities as-is (no `ROLE_`/`SCOPE_` prefix) through `KeycloakRealmRoleConverter`. Null-safe; ignores non-string entries |
-| `TenantFilter` | `OncePerRequestFilter` that reads the `tenant_id` JWT claim and stores it in `TenantContext` |
+| `TenantFilter` | `OncePerRequestFilter` that takes the tenant from the realm that issued the JWT, requires the `tenant_id` claim to be equal, and stores it in `TenantContext`; otherwise 401 |
 | `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that executes `SET LOCAL app.current_tenant` at transaction start, enabling PostgreSQL RLS. Only when JPA is on the classpath and there is an `EntityManagerFactory` |
 | `CurrentUser` | Static access to the current user: `userId()`, `tenantId()`, `employeeId()`, `requireEmployeeId()`, `hasPermission(...)` |
 | `AspaviClaims` | Claim names: `tenant_id`, `employee_id`, `realm_access`, `roles` |
@@ -34,7 +35,7 @@ In `pom.xml`, add the repository and the dependencies. Always use a fixed releas
 
 ```xml
 <properties>
-    <aspavi-auth.version>1.1.1</aspavi-auth.version>
+    <aspavi-auth.version>1.2.0</aspavi-auth.version>
 </properties>
 
 <repositories>
@@ -80,15 +81,41 @@ The GitHub Packages repository requires authentication. In CI, the `setup-java` 
 
 ### 2. Configure tenants in `application.yml`
 
+There are two ways, and they can be combined.
+
+**Issuer pattern (since 1.2.0)** — a new tenant needs no change, no redeploy and no restart of the service:
+
+```yaml
+aspavi:
+  auth:
+    issuer-pattern: ${KEYCLOAK_BASE_URL:https://keycloak.aspavi.com}/realms/rrhh-tenant-{tenant}
+```
+
+Any issuer that matches the pattern is accepted, with `{tenant}` a valid tenant id: `^[a-z][a-z0-9-]{1,29}$` (lowercase letter first, 2–30 characters). The rest of the pattern is matched literally. The pattern must contain `{tenant}` exactly once, or the service does not start.
+
+**Fixed map** — each tenant listed with its issuer; still valid for the `local` profile, the local environment and tests:
+
 ```yaml
 aspavi:
   auth:
     tenants:
-      acme: ${KEYCLOAK_BASE_URL:https://keycloak.aspavi.com}/realms/rrhh-tenant-acme
-      test: ${KEYCLOAK_BASE_URL:https://keycloak.aspavi.com}/realms/rrhh-tenant-test
+      acme: http://localhost:8180/realms/rrhh-tenant-acme
+      test: http://localhost:8180/realms/rrhh-tenant-test
 ```
 
-Each key is the `tenant_id` claim value that Keycloak includes in the JWT. The value is the issuer URI used for OIDC discovery. Add new tenants here and redeploy — no code changes needed. The value must equal the `iss` of the tokens exactly; see [Issuers and the local environment](#issuers-and-the-local-environment).
+Each key is the tenant id; the value is its issuer. A token's `iss` must equal a value exactly.
+
+With both, an issuer is accepted if it is in the map or matches the pattern (the map is checked first). See [Issuers and the local environment](#issuers-and-the-local-environment) for how issuers are validated.
+
+Optional cache settings (defaults shown):
+
+```yaml
+aspavi:
+  auth:
+    issuer-cache:
+      max-size: 100            # decoders kept (one per issuer); the least recently used goes first
+      unknown-issuer-ttl: 5m   # how long a realm that does not exist is rejected without asking Keycloak again
+```
 
 ### 3. Write a `SecurityConfig`
 
@@ -220,7 +247,7 @@ ALTER TABLE my_table FORCE ROW LEVEL SECURITY;
 
 #### MockMvc with permissions — `AspaviJwt`
 
-Spring Security's bare `jwt()` grants `SCOPE_read`, so `hasAuthority('employee:read')` answers 403. `AspaviJwt` (from `aspavi-auth-test`) builds a Keycloak-like token (`tenant_id`, `sub`, optional `employee_id`, `realm_access.roles`) and grants the authorities exactly as the production converter does:
+Spring Security's bare `jwt()` grants `SCOPE_read`, so `hasAuthority('employee:read')` answers 403; since 1.2.0 it gets 401 first, because it has no issuer or `tenant_id` naming a tenant. `AspaviJwt` (from `aspavi-auth-test`) builds a Keycloak-like token (`tenant_id`, `sub`, optional `employee_id`, `realm_access.roles`) and grants the authorities exactly as the production converter does:
 
 ```java
 import static com.aspavi.auth.test.AspaviJwt.withPermissions;
@@ -239,7 +266,9 @@ mockMvc.perform(get("/api/v1/me/absences")
 | Method | Description |
 |--------|-------------|
 | `static AspaviJwt withPermissions(String... permissions)` | Token whose `realm_access.roles` holds these permissions (none if empty) |
-| `AspaviJwt tenantId(String)` | `tenant_id` claim (default `test`) |
+| `AspaviJwt tenantId(String)` | `tenant_id` claim (default `test`); the issuer follows it: `https://keycloak.test/realms/rrhh-tenant-<tenant>` |
+| `AspaviJwt issuer(String)` | `iss` claim, if it must not follow the tenant (e.g. to test a token whose `tenant_id` does not match its realm) |
+| `static String issuerFor(String tenantId)` | The default issuer of a test token of that tenant |
 | `AspaviJwt subject(String)` | `sub` claim (default `test-user`) |
 | `AspaviJwt employeeId(UUID)` | `employee_id` claim (absent by default) |
 | `AspaviJwt claim(String, Object)` | Any other claim |
@@ -247,7 +276,7 @@ mockMvc.perform(get("/api/v1/me/absences")
 | `JwtAuthenticationToken toAuthentication()` | Authenticated token with production authorities |
 | `void authenticate()` | Puts `toAuthentication()` in `SecurityContextHolder` (clear it in `@AfterEach`) |
 
-`AspaviJwt` is a MockMvc `RequestPostProcessor`; it goes through the security filter chain, so `TenantFilter` fills `TenantContext` as in production.
+`AspaviJwt` is a MockMvc `RequestPostProcessor`; it goes through the security filter chain, so `TenantFilter` fills `TenantContext` as in production. Its issuer and its `tenant_id` always name the same tenant unless `issuer(...)` or `claim("tenant_id", ...)` is used, so it needs no tenant configuration in the test `application.yml`.
 
 #### Service-layer tests that use `CurrentUser`
 
@@ -279,6 +308,8 @@ class MyServiceApplicationTests {
 }
 ```
 
+A `Jwt` that such a mock returns must name its tenant twice, like a real one: an `iss` of the tenant's realm (in the map, matching the pattern, or ending in `/realms/rrhh-tenant-<tenant>`) and the same `tenant_id`. `AspaviJwt.withPermissions(...).tenantId("acme").toJwt()` does both.
+
 For unit tests that call service methods which use `TenantContext`, set the tenant manually:
 
 ```java
@@ -299,9 +330,28 @@ void clearTenant() {
 
 ### How the issuer is validated
 
-- `aspavi.auth.tenants` maps each tenant to **one** issuer. The `iss` claim of the token must match that value exactly (scheme, host, port and path); otherwise the request gets 401 (`Unknown or missing issuer in token`).
-- For each issuer, `MultiTenantJwtDecoder` uses `NimbusJwtDecoder.withIssuerLocation(issuer)`. On the first token it calls `<issuer>/.well-known/openid-configuration`, checks that the `issuer` in that document equals the configured one, and then fetches the signing keys from the `jwks_uri` the document returns.
-- So the configured issuer must be the exact `iss` of the tokens **and** reachable, together with its `jwks_uri`, from wherever the service runs. Listing several issuers per tenant would not change this: the discovery URL and the keys URL come from the issuer.
+- `MultiTenantJwtDecoder` reads `iss` from the token **without** verifying it, only to choose a decoder. An `iss` that is neither in `aspavi.auth.tenants` (exact match: scheme, host, port and path) nor matches `aspavi.auth.issuer-pattern` gets 401 (`Unknown or missing issuer in token`) **without any request to Keycloak**.
+- For an accepted issuer, on its first token the decoder calls `<issuer>/.well-known/openid-configuration` once, checks that the `issuer` in that document equals the token's, and builds a decoder on the `jwks_uri` it returns. That decoder verifies the signature with that realm's keys and requires `iss` to equal the issuer. A token of realm A signed with the keys of realm B is rejected.
+- Decoders are cached per issuer, up to `issuer-cache.max-size` (least recently used out first).
+- If discovery answers 404/410 (Keycloak's answer for a realm that does not exist), or the document describes another issuer, the issuer is rejected for `issuer-cache.unknown-issuer-ttl` without asking Keycloak again, so a made-up `iss` that fits the pattern does not reach Keycloak on every request. A tenant whose realm is created meanwhile is accepted once that time has passed. Other failures (Keycloak unreachable, timeout, 5xx) are not remembered, and the next request tries again.
+- So the issuer must be the exact `iss` of the tokens **and** reachable, together with its `jwks_uri`, from wherever the service runs. Listing several issuers per tenant would not change this: the discovery URL and the keys URL come from the issuer.
+
+### How the tenant of a request is decided
+
+`TenantFilter` runs after the token has been validated:
+
+- the tenant is the one of the realm that issued the token: its tenant in the map, or the `{tenant}` of the pattern. For an issuer the library's decoder did not check (test tokens, or a service with its own `JwtDecoder`), it falls back to the realm name `.../realms/rrhh-tenant-<tenant>`;
+- the `tenant_id` claim must be present and equal to it. Every real token has it (a Keycloak mapper sets it for users and for service accounts);
+- otherwise the request ends with **401** and the common error body, before any controller runs:
+
+```json
+{"timestamp":"2026-11-12T10:15:30.123","status":401,"error":"UNAUTHORIZED",
+ "message":"Token tenant_id does not match the realm that issued it","path":"/api/v1/employees"}
+```
+
+Messages: `Token issuer does not belong to any tenant`, `Token has no tenant_id claim`, `Token tenant_id does not match the realm that issued it`. Before 1.2.0 a token without `tenant_id` went through without a tenant, and the claim was not compared with the realm.
+
+Requests without a JWT (public endpoints) go through without a tenant, as before.
 
 ### aspavi-local (the local Docker environment)
 
@@ -336,7 +386,7 @@ ASPAVI_ROOT=<workspace> docker compose -p aspavi-local \
 
 ### Possible improvement: debugging from the IDE against aspavi-local
 
-Not implemented. A backward-compatible option (it would be 1.2.0) is an optional `aspavi.auth.jwk-set-uris.<tenant>`. For a tenant that sets it, the decoder would skip discovery, fetch the keys from that URI and still require the exact `iss` of `aspavi.auth.tenants`:
+Not implemented. A backward-compatible option (a later minor version) is an optional `aspavi.auth.jwk-set-uris.<tenant>`. For a tenant that sets it, the decoder would skip discovery, fetch the keys from that URI and still require the exact `iss` of `aspavi.auth.tenants` or of the pattern:
 
 ```yaml
 aspavi:

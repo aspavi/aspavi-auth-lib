@@ -36,6 +36,7 @@ import static org.springframework.security.test.web.servlet.request.SecurityMock
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -73,9 +74,29 @@ class AspaviJwtMockMvcTest {
     }
 
     @Test
-    void bareSpringJwtIsDeniedBecauseItOnlyGrantsScopeAuthorities() throws Exception {
+    void bareSpringJwtIsRejectedBecauseItNamesNoTenant() throws Exception {
         mockMvc.perform(get("/employees").with(jwt()))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void bareSpringJwtWithATenantIsDeniedBecauseItOnlyGrantsScopeAuthorities() throws Exception {
+        mockMvc.perform(get("/employees").with(jwt().jwt(j -> j
+                        .issuer(AspaviJwt.issuerFor("test"))
+                        .claim("tenant_id", "test"))))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void tenantClaimThatDoesNotMatchTheRealmIsRejectedWithTheCommonErrorBody() throws Exception {
+        mockMvc.perform(get("/employees").with(AspaviJwt.withPermissions("employee:read")
+                        .tenantId("acme")
+                        .issuer(AspaviJwt.issuerFor("test"))))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.status").value(401))
+                .andExpect(jsonPath("$.error").value("UNAUTHORIZED"))
+                .andExpect(jsonPath("$.message").value("Token tenant_id does not match the realm that issued it"))
+                .andExpect(jsonPath("$.path").value("/employees"));
     }
 
     @Test
