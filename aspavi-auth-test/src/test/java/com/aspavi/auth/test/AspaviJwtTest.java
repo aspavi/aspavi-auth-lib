@@ -40,6 +40,7 @@ class AspaviJwtTest {
 
         assertThat(jwt.getSubject()).isEqualTo(AspaviJwt.DEFAULT_SUBJECT);
         assertThat(jwt.getClaimAsString("tenant_id")).isEqualTo(AspaviJwt.DEFAULT_TENANT_ID);
+        assertThat(jwt.getIssuer()).hasToString(AspaviJwt.DEFAULT_ISSUER);
         assertThat(jwt.getClaimAsMap("realm_access")).isEqualTo(Map.of("roles", List.of("employee:read")));
         assertThat(jwt.hasClaim("employee_id")).isFalse();
     }
@@ -55,9 +56,18 @@ class AspaviJwtTest {
 
         assertThat(jwt.getSubject()).isEqualTo("kc-user-1");
         assertThat(jwt.getClaimAsString("tenant_id")).isEqualTo("acme");
+        assertThat(jwt.getIssuer()).hasToString("https://keycloak.test/realms/rrhh-tenant-acme");
         assertThat(jwt.getClaimAsString("employee_id")).isEqualTo(EMPLOYEE.toString());
         assertThat(jwt.getClaimAsString("preferred_username")).isEqualTo("jdoe");
         assertThat(jwt.getClaimAsMap("realm_access")).isEqualTo(Map.of("roles", List.of()));
+    }
+
+    @Test
+    void issuerCanBeSetApartFromTheTenant() {
+        Jwt jwt = AspaviJwt.withPermissions().issuer("https://kc.example.com/realms/rrhh-tenant-test").tenantId("acme").toJwt();
+
+        assertThat(jwt.getIssuer()).hasToString("https://kc.example.com/realms/rrhh-tenant-test");
+        assertThat(jwt.getClaimAsString("tenant_id")).isEqualTo("acme");
     }
 
     @Test

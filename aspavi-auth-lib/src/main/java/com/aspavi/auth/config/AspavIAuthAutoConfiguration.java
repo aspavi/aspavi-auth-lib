@@ -3,6 +3,7 @@ package com.aspavi.auth.config;
 import com.aspavi.auth.security.KeycloakRealmRoleConverter;
 import com.aspavi.auth.security.TenantFilter;
 import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
+import com.aspavi.auth.tenant.TenantIssuers;
 import jakarta.persistence.EntityManagerFactory;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnBean;
@@ -38,10 +39,20 @@ public class AspavIAuthAutoConfiguration {
     // JWT decoding — multi-tenant, per-issuer caching
     // -------------------------------------------------------------------------
 
+    /** Issuer → tenant, from {@code aspavi.auth.tenants} and {@code aspavi.auth.issuer-pattern}. */
     @Bean
     @ConditionalOnMissingBean
-    public JwtDecoder jwtDecoder(AuthProperties properties) {
-        return new MultiTenantJwtDecoder(properties.getTenants());
+    public TenantIssuers tenantIssuers(AuthProperties properties) {
+        return TenantIssuers.of(properties.getTenants(), properties.getIssuerPattern());
+    }
+
+    @Bean
+    @ConditionalOnMissingBean
+    public JwtDecoder jwtDecoder(TenantIssuers tenantIssuers, AuthProperties properties) {
+        return new MultiTenantJwtDecoder(
+                tenantIssuers,
+                properties.getIssuerCache().getMaxSize(),
+                properties.getIssuerCache().getUnknownIssuerTtl());
     }
 
     // -------------------------------------------------------------------------
@@ -63,13 +74,14 @@ public class AspavIAuthAutoConfiguration {
     }
 
     // -------------------------------------------------------------------------
-    // Tenant filter — extracts tenant_id claim and stores in TenantContext
+    // Tenant filter — tenant of the issuing realm, checked against the tenant_id
+    // claim, stored in TenantContext
     // -------------------------------------------------------------------------
 
     @Bean
     @ConditionalOnMissingBean
-    public TenantFilter tenantFilter() {
-        return new TenantFilter();
+    public TenantFilter tenantFilter(TenantIssuers tenantIssuers) {
+        return new TenantFilter(tenantIssuers);
     }
 
     // -------------------------------------------------------------------------
