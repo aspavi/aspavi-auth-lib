@@ -283,7 +283,17 @@ Enable it in the tests too, so that a path without tenant fails in CI rather tha
 
 A Spring Data repository translates exceptions: called without tenant, it throws `InvalidDataAccessApiUsageException` with the same message and the `MissingTenantException` as its cause. A `@Transactional` service method or a `TransactionTemplate` throws the `MissingTenantException` itself. In a test, `assertThatThrownBy(...).hasCauseInstanceOf(MissingTenantException.class)` (or `.rootCause()`) covers the repository case.
 
-> In 1.3.0 Spring Data repositories did not use this transaction manager: they look theirs up by the name `transactionManager`, which was still Spring Boot's own `JpaTransactionManager`. A repository called without an outer transaction set no `app.current_tenant`, and strict mode did not apply to it. From 1.3.1 the lib's manager is that bean and Spring Boot's is not created. Use 1.3.1, not 1.3.0.
+#### Repositories called without a transaction (since 1.3.1)
+
+Spring Data gives a transaction only to the methods it implements (`findAll`, `save`, `deleteById`...). The query methods declared on a repository interface — derived `findBy…`, `countBy…`, `deleteBy…`, `@Query`, default methods and custom fragments — get none, and outside a transaction they would run in auto-commit, with no tenant and out of reach of strict mode.
+
+The lib adds an interceptor to every Spring Data JPA repository: a method called **with no transaction active** runs in a transaction of the lib's manager, named `<repository>.<method>`. So the tenant is set, and strict mode throws without one. Nothing to add to the repositories.
+
+- A transaction already open (the caller's, or the one Spring Data opens for its own methods) is used as it is: the method joins it, and an exception from the method does not mark it rollback-only.
+- The transaction is not read-only: a derived `deleteBy…` or a default method that calls `save` must flush. A `@Transactional(readOnly = true)` on the repository keeps working as before.
+- A `Stream<T>` query method still needs a transaction around the call, as Spring Data requires.
+
+> In 1.3.0 Spring Data repositories did not use this transaction manager: they look theirs up by the name `transactionManager`, which was still Spring Boot's own `JpaTransactionManager`. A repository called without an outer transaction set no `app.current_tenant`, and strict mode did not apply to it; nor did it to the declared query methods, which had no transaction at all. From 1.3.1 the lib's manager is that bean, Spring Boot's is not created, and every repository method called without transaction gets one. Use 1.3.1, not 1.3.0.
 
 ### 8. Tests
 

@@ -2,13 +2,16 @@ package com.aspavi.auth.config;
 
 import com.aspavi.auth.tenant.TenantAwareJpaTransactionManager;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.boot.autoconfigure.AutoConfiguration;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnClass;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnSingleCandidate;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.boot.transaction.autoconfigure.TransactionManagerCustomizers;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Primary;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import javax.sql.DataSource;
 
@@ -26,6 +29,10 @@ import javax.sql.DataSource;
  * {@code transactionManager} is {@code @ConditionalOnMissingBean(TransactionManager.class)} and so
  * backs off. The manager finds the {@code EntityManagerFactory} in the bean factory when it starts,
  * as Spring Boot's own does, and {@code spring.transaction.*} customizations apply to it.
+ *
+ * <p>Spring Data repositories also get, for the methods it gives no transaction (query methods
+ * declared on the interface), a transaction of this manager when they are called with none active:
+ * see {@link RepositoryTransactionInterceptor}.
  *
  * <p>It is always registered when JPA is on the classpath and there is a single {@code DataSource}:
  * a service that declares its own {@code transactionManager} bean fails to start instead of losing
@@ -65,5 +72,17 @@ public class TenantTransactionManagerAutoConfiguration {
         transactionManager.setStrict(properties.getTenant().isStrict());
         transactionManagerCustomizers.ifAvailable(customizers -> customizers.customize(transactionManager));
         return transactionManager;
+    }
+
+    /** Repository query methods called without transaction go through the manager above. */
+    @Configuration(proxyBeanMethods = false)
+    @ConditionalOnClass(name = "org.springframework.data.jpa.repository.support.JpaRepositoryFactoryBean")
+    static class RepositoryTransactionConfiguration {
+
+        @Bean
+        static BeanPostProcessor aspaviRepositoryTransactionPostProcessor(
+                ObjectProvider<PlatformTransactionManager> transactionManager) {
+            return new RepositoryTransactionPostProcessor(transactionManager);
+        }
     }
 }
