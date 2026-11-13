@@ -19,7 +19,7 @@ Both are published together with their parent POM (`com.aspavi:aspavi-auth-paren
 | `JwtDecoder` | Multi-tenant decoder: accepts only the issuers of `TenantIssuers`, discovers each realm's keys on first use and caches them (bounded, with a negative cache for realms that do not exist) |
 | `JwtAuthenticationConverter` | Maps `realm_access.roles` to authorities as-is (no `ROLE_`/`SCOPE_` prefix) through `KeycloakRealmRoleConverter`. Null-safe; ignores non-string entries |
 | `TenantFilter` | `OncePerRequestFilter` that takes the tenant from the realm that issued the JWT, requires the `tenant_id` claim to be equal, and stores it in `TenantContext`; otherwise 401 |
-| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that executes `SET LOCAL app.current_tenant` at transaction start, enabling PostgreSQL RLS. Only when JPA is on the classpath and there is an `EntityManagerFactory` |
+| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that sets `app.current_tenant` (`set_config(..., true)`, local to the transaction) at transaction start, enabling PostgreSQL RLS. In strict mode a transaction without tenant fails with `MissingTenantException`. Only when JPA is on the classpath and there is an `EntityManagerFactory` |
 | `CurrentUser` | Static access to the current user: `userId()`, `tenantId()`, `employeeId()`, `requireEmployeeId()`, `hasPermission(...)` |
 | `AspaviClaims` | Claim names: `tenant_id`, `employee_id`, `realm_access`, `roles` |
 
@@ -35,7 +35,7 @@ In `pom.xml`, add the repository and the dependencies. Always use a fixed releas
 
 ```xml
 <properties>
-    <aspavi-auth.version>1.2.0</aspavi-auth.version>
+    <aspavi-auth.version>1.3.0</aspavi-auth.version>
 </properties>
 
 <repositories>
@@ -173,6 +173,24 @@ public class MyService {
 `TenantContext.getTenantId()` returns `null` if no tenant is set (unauthenticated paths).
 `TenantContext.getRequiredTenantId()` throws `IllegalStateException` — use in methods that must have a tenant.
 
+#### Work that does not come from a request (since 1.3.0)
+
+Scheduled jobs, message consumers, start-up tasks and outbox relays have no `TenantFilter` in front, so they say which tenant they work for:
+
+```java
+// As one tenant: transactions inside set app.current_tenant to it.
+// The previous context comes back afterwards, also on an exception; calls can be nested.
+List<Order> pending = TenantContext.runAs(tenantId, () -> orderService.findPending());
+TenantContext.runAs(message.tenantId(), () -> handler.handle(message));
+
+// Explicitly as no tenant, for system work that belongs to no tenant, e.g. calling the
+// SECURITY DEFINER function that lists the tenants with pending work.
+List<String> tenants = TenantContext.runWithoutTenant(() -> outboxRepository.tenantsWithPendingEvents());
+tenants.forEach(t -> TenantContext.runAs(t, () -> relay.publishPending()));
+```
+
+Both take a `Supplier<T>` or a `Runnable`. Inside `runWithoutTenant` a transaction may start without tenant even in strict mode; `app.current_tenant` is not set, so a strict RLS policy shows and accepts no row. A transaction that is already open keeps the tenant it started with: what matters is the context when the transaction begins.
+
 ### 5. Protect endpoints with permissions
 
 Permissions are atomic Keycloak realm roles named `<resource>:read` / `<resource>:write` (e.g. `employee:read`). Roles are composite realm roles that group permissions; Keycloak puts the user's effective roles in `realm_access.roles`, so a token carries every atomic permission of its composite roles. Services only check permissions, never composite roles:
@@ -227,7 +245,7 @@ The `employee_id` claim comes from a Keycloak user attribute mapper.
 
 ### 7. Set up PostgreSQL RLS (optional but recommended)
 
-`TenantAwareJpaTransactionManager` sets `SET LOCAL app.current_tenant = '<tenantId>'` on the transaction connection. Wire up RLS policies in your migration:
+At the start of each transaction, `TenantAwareJpaTransactionManager` runs `SELECT set_config('app.current_tenant', ?, true)` on the transaction connection, with the tenant of `TenantContext` as a bound parameter. `true` makes it local to the transaction, like `SET LOCAL`: after commit or rollback the pooled connection no longer carries it. Wire up RLS policies in your migration:
 
 ```sql
 -- Enable RLS on the table
@@ -235,13 +253,33 @@ ALTER TABLE my_table ENABLE ROW LEVEL SECURITY;
 
 -- Allow app_user to see only its own tenant's rows
 CREATE POLICY tenant_isolation ON my_table
-    USING (tenant_id = current_setting('app.current_tenant', true));
+    USING (tenant_id = current_setting('app.current_tenant', true))
+    WITH CHECK (tenant_id = current_setting('app.current_tenant', true));
 
 -- app_user needs BYPASSRLS disabled (default) and the policy must apply
 ALTER TABLE my_table FORCE ROW LEVEL SECURITY;
 ```
 
-> Before 1.1.0 the transaction manager was not registered on Spring Boot 4 (the auto-configuration ordering pointed at the Boot 3 class name), so `app.current_tenant` was never set. From 1.1.0 it is active.
+> Before 1.1.0 the transaction manager was not registered on Spring Boot 4 (the auto-configuration ordering pointed at the Boot 3 class name), so `app.current_tenant` was never set. From 1.1.0 it is active. Before 1.3.0 it ran `SET LOCAL` with the tenant concatenated into the SQL.
+
+#### Strict tenant mode (since 1.3.0)
+
+```yaml
+aspavi:
+  auth:
+    tenant:
+      strict: true   # default false
+```
+
+Without a tenant, a strict policy like the one above shows no row and rejects every insert, so a forgotten tenant would look like empty data. In strict mode a transaction that starts without tenant, outside `TenantContext.runWithoutTenant(...)`, does not start: it throws `MissingTenantException` (an `IllegalStateException`) whose message names the transaction, `<class>.<method>` for a `@Transactional` method, or the name of a `TransactionTemplate`. Nothing stays bound to the thread.
+
+| Tenant when the transaction begins | `strict: false` (default) | `strict: true` |
+|------------------------------------|---------------------------|----------------|
+| Set (`TenantFilter`, `runAs`, `setTenantId`) | `app.current_tenant` = tenant | `app.current_tenant` = tenant |
+| None, inside `runWithoutTenant` | Runs, variable not set (DEBUG log) | Runs, variable not set (DEBUG log) |
+| None, anywhere else | Runs, variable not set | `MissingTenantException` |
+
+Enable it in the tests too, so that a path without tenant fails in CI rather than in the cluster.
 
 ### 8. Tests
 

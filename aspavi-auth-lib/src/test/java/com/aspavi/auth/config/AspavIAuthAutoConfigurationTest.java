@@ -132,6 +132,24 @@ class AspavIAuthAutoConfigurationTest {
                     assertThat(context).hasSingleBean(TenantAwareJpaTransactionManager.class);
                     assertThat(context.getBean(PlatformTransactionManager.class))
                             .isInstanceOf(TenantAwareJpaTransactionManager.class);
+                    assertThat(context.getBean(TenantAwareJpaTransactionManager.class).isStrict()).isFalse();
+                });
+    }
+
+    @Test
+    void strictTenantModeIsBoundToTheTransactionManager() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        AspavIAuthAutoConfiguration.class,
+                        DataSourceAutoConfiguration.class,
+                        HibernateJpaAutoConfiguration.class))
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:h2:mem:strict;DB_CLOSE_DELAY=-1",
+                        "spring.datasource.username=sa",
+                        "aspavi.auth.tenant.strict=true")
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    assertThat(context.getBean(TenantAwareJpaTransactionManager.class).isStrict()).isTrue();
                 });
     }
 

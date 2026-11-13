@@ -46,6 +46,8 @@ public class AuthProperties {
 
     private final IssuerCache issuerCache = new IssuerCache();
 
+    private final Tenant tenant = new Tenant();
+
     public Map<String, String> getTenants() {
         return tenants;
     }
@@ -64,6 +66,29 @@ public class AuthProperties {
 
     public IssuerCache getIssuerCache() {
         return issuerCache;
+    }
+
+    public Tenant getTenant() {
+        return tenant;
+    }
+
+    /** How transactions treat the tenant of {@code TenantContext}. */
+    public static class Tenant {
+
+        /**
+         * Whether a transaction that starts without tenant fails with {@code MissingTenantException}
+         * instead of running without {@code app.current_tenant}. System work that belongs to no tenant
+         * runs inside {@code TenantContext.runWithoutTenant(...)}, which is allowed either way.
+         */
+        private boolean strict = false;
+
+        public boolean isStrict() {
+            return strict;
+        }
+
+        public void setStrict(boolean strict) {
+            this.strict = strict;
+        }
     }
 
     /** Caches of the multi-tenant JWT decoder. */

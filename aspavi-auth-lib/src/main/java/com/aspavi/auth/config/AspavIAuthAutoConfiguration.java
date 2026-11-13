@@ -87,9 +87,10 @@ public class AspavIAuthAutoConfiguration {
     // -------------------------------------------------------------------------
     // Tenant-aware transaction manager
     //
-    // Replaces the default JpaTransactionManager with our subclass that calls
-    // SET LOCAL app.current_tenant inside doBegin(), guaranteeing the variable
-    // is set on the transaction connection before any Hibernate SQL executes.
+    // Replaces the default JpaTransactionManager with our subclass that runs
+    // set_config('app.current_tenant', ?, true) inside doBegin(), guaranteeing the
+    // variable is set on the transaction connection before any Hibernate SQL executes.
+    // With aspavi.auth.tenant.strict=true, a transaction without tenant fails.
     //
     // @Primary ensures this bean wins over the default one registered by
     // HibernateJpaAutoConfiguration. No @ConditionalOnMissingBean here —
@@ -113,10 +114,12 @@ public class AspavIAuthAutoConfiguration {
         @ConditionalOnBean({DataSource.class, EntityManagerFactory.class})
         public TenantAwareJpaTransactionManager tenantAwareTransactionManager(
                 EntityManagerFactory entityManagerFactory,
-                DataSource dataSource) {
+                DataSource dataSource,
+                AuthProperties properties) {
             TenantAwareJpaTransactionManager tm = new TenantAwareJpaTransactionManager();
             tm.setEntityManagerFactory(entityManagerFactory);
             tm.setDataSource(dataSource);
+            tm.setStrict(properties.getTenant().isStrict());
             return tm;
         }
     }
