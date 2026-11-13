@@ -58,7 +58,7 @@ class TenantAwareJpaTransactionManagerTest {
                     + " USING (tenant_id = current_setting('app.current_tenant', true))"
                     + " WITH CHECK (tenant_id = current_setting('app.current_tenant', true))");
             sql.execute("CREATE ROLE " + APP + " LOGIN PASSWORD '" + APP_PASSWORD + "'");
-            sql.execute("GRANT SELECT, INSERT ON item TO " + APP);
+            sql.execute("GRANT SELECT, INSERT, DELETE ON item TO " + APP);
             sql.execute("GRANT USAGE ON SEQUENCE item_id_seq TO " + APP);
             sql.execute("ALTER TABLE item DISABLE ROW LEVEL SECURITY");
             sql.execute("INSERT INTO item (tenant_id, name) VALUES ('acme', 'acme-1'), ('acme', 'acme-2'),"
@@ -225,6 +225,103 @@ class TenantAwareJpaTransactionManagerTest {
                     .cause().isInstanceOf(MissingTenantException.class);
             assertThatThrownBy(items::count).hasCauseInstanceOf(MissingTenantException.class);
             assertThat(TenantContext.runWithoutTenant(() -> items.count())).isZero();
+        });
+    }
+
+    // ── Query methods declared on the repository: Spring Data gives them no transaction ──
+
+    @Test
+    void declaredQueryMethodsCalledWithoutOuterTransactionSeeOnlyTheirTenant() {
+        withDatabase(false, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            TenantContext.runAs("acme", () -> {
+                assertThat(names(items.findByNameStartingWithOrderByName(""))).containsExactly("acme-1", "acme-2");
+                assertThat(items.findByNameStartingWithOrderByName("beta")).isEmpty();
+                assertThat(items.countByNameStartingWith("acme")).isEqualTo(2);
+                assertThat(items.countAllItems()).isEqualTo(2);
+                assertThat(items.namesStartingWith("")).containsExactly("acme-1", "acme-2");
+            });
+            TenantContext.runAs("beta", () -> assertThat(items.countAllItems()).isEqualTo(1));
+        });
+    }
+
+    @Test
+    void declaredQueryMethodsWithoutTenantSeeNothingByDefault() {
+        withDatabase(false, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            assertThat(items.countAllItems()).isZero();
+            assertThat(items.findByNameStartingWithOrderByName("")).isEmpty();
+        });
+    }
+
+    @Test
+    void inStrictModeDeclaredQueryMethodsWithoutTenantThrow() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            assertThatThrownBy(() -> items.findByNameStartingWithOrderByName("acme"))
+                    .hasMessageContaining("ItemRepository.findByNameStartingWithOrderByName")
+                    .hasCauseInstanceOf(MissingTenantException.class);
+            assertThatThrownBy(() -> items.countByNameStartingWith("acme"))
+                    .hasCauseInstanceOf(MissingTenantException.class);
+            assertThatThrownBy(items::countAllItems).hasCauseInstanceOf(MissingTenantException.class);
+            assertThatThrownBy(() -> items.namesStartingWith("")).hasCauseInstanceOf(MissingTenantException.class);
+        });
+    }
+
+    @Test
+    void inStrictModeDeclaredQueryMethodsRunInsideRunWithoutTenant() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            assertThat(TenantContext.runWithoutTenant(() -> items.countAllItems())).isZero();
+            assertThat(TenantContext.runWithoutTenant(() -> items.countByNameStartingWith("acme"))).isZero();
+        });
+    }
+
+    @Test
+    void aQueryMethodJoinsTheTransactionThatIsAlreadyOpen() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            TenantContext.runAs("epsilon", () -> new TransactionTemplate(db.manager()).executeWithoutResult(status -> {
+                db.jdbc().update("INSERT INTO item (tenant_id, name) VALUES ('epsilon', 'epsilon-1')");
+                // Sees the outer transaction's uncommitted row, so it runs inside that transaction.
+                assertThat(items.countByNameStartingWith("epsilon")).isEqualTo(1);
+                status.setRollbackOnly();
+            }));
+
+            assertThat(TenantContext.runAs("epsilon", () -> items.countByNameStartingWith("epsilon"))).isZero();
+        });
+    }
+
+    @Test
+    void aFailingQueryMethodDoesNotMarkTheOuterTransactionRollbackOnly() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            TenantContext.runAs("zeta", () -> new TransactionTemplate(db.manager()).executeWithoutResult(status -> {
+                db.jdbc().update("INSERT INTO item (tenant_id, name) VALUES ('zeta', 'zeta-1'), ('zeta', 'zeta-2')");
+                assertThatThrownBy(() -> items.findOneByNameStartingWith("zeta"))
+                        .isInstanceOf(org.springframework.dao.IncorrectResultSizeDataAccessException.class);
+                assertThat(status.isRollbackOnly()).isFalse();
+            }));
+
+            assertThat(TenantContext.runAs("zeta", () -> items.countByNameStartingWith("zeta"))).isEqualTo(2);
+        });
+    }
+
+    @Test
+    void aDerivedDeleteWithoutTransactionalDeletesWithTheTenant() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+            TenantContext.runAs("eta", () -> items.save(new Item("eta", "eta-1")));
+
+            assertThat(TenantContext.runAs("eta", () -> items.deleteByName("eta-1"))).isEqualTo(1);
+
+            assertThat(TenantContext.runAs("eta", () -> items.countAllItems())).isZero();
         });
     }
 
