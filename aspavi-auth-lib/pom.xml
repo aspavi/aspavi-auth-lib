@@ -8,7 +8,7 @@
     <parent>
         <groupId>com.aspavi</groupId>
         <artifactId>aspavi-auth-parent</artifactId>
-        <version>1.3.0-SNAPSHOT</version>
+        <version>1.3.0</version>
     </parent>
 
     <artifactId>aspavi-auth-lib</artifactId>
@@ -71,6 +71,17 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <!-- TenantAwareJpaTransactionManagerTest: row-level security on a real PostgreSQL (needs Docker) -->
+        <dependency>
+            <groupId>org.postgresql</groupId>
+            <artifactId>postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
