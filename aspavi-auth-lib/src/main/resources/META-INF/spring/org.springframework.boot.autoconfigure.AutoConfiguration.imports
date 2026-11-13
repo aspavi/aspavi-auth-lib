@@ -1,1 +1,2 @@
 com.aspavi.auth.config.AspavIAuthAutoConfiguration
+com.aspavi.auth.config.TenantTransactionManagerAutoConfiguration

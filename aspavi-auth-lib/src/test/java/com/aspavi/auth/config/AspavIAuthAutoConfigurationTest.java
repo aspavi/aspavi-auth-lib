@@ -118,10 +118,11 @@ class AspavIAuthAutoConfigurationTest {
     }
 
     @Test
-    void registersTenantAwareTransactionManagerAfterSpringBootJpa() {
+    void theTenantAwareTransactionManagerIsTheOnlyOneAndIsNamedTransactionManager() {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
                         AspavIAuthAutoConfiguration.class,
+                        TenantTransactionManagerAutoConfiguration.class,
                         DataSourceAutoConfiguration.class,
                         HibernateJpaAutoConfiguration.class))
                 .withPropertyValues(
@@ -133,6 +134,11 @@ class AspavIAuthAutoConfigurationTest {
                     assertThat(context.getBean(PlatformTransactionManager.class))
                             .isInstanceOf(TenantAwareJpaTransactionManager.class);
                     assertThat(context.getBean(TenantAwareJpaTransactionManager.class).isStrict()).isFalse();
+                    assertThat(context.getBeansOfType(PlatformTransactionManager.class)).hasSize(1);
+                    assertThat(context.getBean("transactionManager"))
+                            .isSameAs(context.getBean(TenantAwareJpaTransactionManager.class));
+                    assertThat(context.getBean("tenantAwareTransactionManager"))
+                            .isSameAs(context.getBean(TenantAwareJpaTransactionManager.class));
                 });
     }
 
@@ -141,6 +147,7 @@ class AspavIAuthAutoConfigurationTest {
         new ApplicationContextRunner()
                 .withConfiguration(AutoConfigurations.of(
                         AspavIAuthAutoConfiguration.class,
+                        TenantTransactionManagerAutoConfiguration.class,
                         DataSourceAutoConfiguration.class,
                         HibernateJpaAutoConfiguration.class))
                 .withPropertyValues(
@@ -155,14 +162,40 @@ class AspavIAuthAutoConfigurationTest {
 
     @Test
     void startsWithoutJpaOnTheClasspath() {
-        runner.withClassLoader(new FilteredClassLoader("jakarta.persistence.", "org.springframework.orm."))
+        runner.withConfiguration(AutoConfigurations.of(TenantTransactionManagerAutoConfiguration.class))
+                .withClassLoader(new FilteredClassLoader("jakarta.persistence.", "org.springframework.orm."))
                 .run(context -> {
                     assertThat(context).hasNotFailed();
                     assertThat(context).hasSingleBean(JwtDecoder.class);
                     assertThat(context).hasSingleBean(JwtAuthenticationConverter.class);
                     assertThat(context).hasSingleBean(TenantFilter.class);
                     assertThat(context).doesNotHaveBean("tenantAwareTransactionManager");
+                    assertThat(context).doesNotHaveBean("transactionManager");
                 });
+    }
+
+    @Test
+    void aServiceThatDeclaresItsOwnTransactionManagerFailsToStart() {
+        new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(
+                        AspavIAuthAutoConfiguration.class,
+                        TenantTransactionManagerAutoConfiguration.class,
+                        DataSourceAutoConfiguration.class,
+                        HibernateJpaAutoConfiguration.class))
+                .withUserConfiguration(OwnTransactionManagerConfig.class)
+                .withPropertyValues(
+                        "spring.datasource.url=jdbc:h2:mem:own-tm;DB_CLOSE_DELAY=-1",
+                        "spring.datasource.username=sa")
+                .run(context -> assertThat(context).hasFailed()
+                        .getFailure().hasMessageContaining("transactionManager"));
+    }
+
+    @Configuration(proxyBeanMethods = false)
+    static class OwnTransactionManagerConfig {
+        @Bean
+        PlatformTransactionManager transactionManager(jakarta.persistence.EntityManagerFactory emf) {
+            return new org.springframework.orm.jpa.JpaTransactionManager(emf);
+        }
     }
 
     @Configuration(proxyBeanMethods = false)
