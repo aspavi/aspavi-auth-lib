@@ -19,11 +19,11 @@ Both are published together with their parent POM (`com.aspavi:aspavi-auth-paren
 | `JwtDecoder` | Multi-tenant decoder: accepts only the issuers of `TenantIssuers`, discovers each realm's keys on first use and caches them (bounded, with a negative cache for realms that do not exist) |
 | `JwtAuthenticationConverter` | Maps `realm_access.roles` to authorities as-is (no `ROLE_`/`SCOPE_` prefix) through `KeycloakRealmRoleConverter`. Null-safe; ignores non-string entries |
 | `TenantFilter` | `OncePerRequestFilter` that takes the tenant from the realm that issued the JWT, requires the `tenant_id` claim to be equal, and stores it in `TenantContext`; otherwise 401 |
-| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that sets `app.current_tenant` (`set_config(..., true)`, local to the transaction) at transaction start, enabling PostgreSQL RLS. In strict mode a transaction without tenant fails with `MissingTenantException`. Only when JPA is on the classpath and there is an `EntityManagerFactory` |
+| `TenantAwareJpaTransactionManager` | `JpaTransactionManager` subclass that sets `app.current_tenant` (`set_config(..., true)`, local to the transaction) at transaction start, enabling PostgreSQL RLS. In strict mode a transaction without tenant fails with `MissingTenantException`. It is the context's only transaction manager, named `transactionManager`. Only when JPA is on the classpath and there is a single `DataSource` |
 | `CurrentUser` | Static access to the current user: `userId()`, `tenantId()`, `employeeId()`, `requireEmployeeId()`, `hasPermission(...)` |
 | `AspaviClaims` | Claim names: `tenant_id`, `employee_id`, `realm_access`, `roles` |
 
-All beans are `@ConditionalOnMissingBean` (except the transaction manager) — declare your own to override any of them.
+All beans are `@ConditionalOnMissingBean` (except the transaction manager) — declare your own to override any of them. Do not declare a `transactionManager` bean: the service would fail to start, on purpose, rather than run without tenant isolation.
 
 ---
 
@@ -35,7 +35,7 @@ In `pom.xml`, add the repository and the dependencies. Always use a fixed releas
 
 ```xml
 <properties>
-    <aspavi-auth.version>1.3.0</aspavi-auth.version>
+    <aspavi-auth.version>1.3.1</aspavi-auth.version>
 </properties>
 
 <repositories>
@@ -280,6 +280,10 @@ Without a tenant, a strict policy like the one above shows no row and rejects ev
 | None, anywhere else | Runs, variable not set | `MissingTenantException` |
 
 Enable it in the tests too, so that a path without tenant fails in CI rather than in the cluster.
+
+A Spring Data repository translates exceptions: called without tenant, it throws `InvalidDataAccessApiUsageException` with the same message and the `MissingTenantException` as its cause. A `@Transactional` service method or a `TransactionTemplate` throws the `MissingTenantException` itself. In a test, `assertThatThrownBy(...).hasCauseInstanceOf(MissingTenantException.class)` (or `.rootCause()`) covers the repository case.
+
+> In 1.3.0 Spring Data repositories did not use this transaction manager: they look theirs up by the name `transactionManager`, which was still Spring Boot's own `JpaTransactionManager`. A repository called without an outer transaction set no `app.current_tenant`, and strict mode did not apply to it. From 1.3.1 the lib's manager is that bean and Spring Boot's is not created. Use 1.3.1, not 1.3.0.
 
 ### 8. Tests
 

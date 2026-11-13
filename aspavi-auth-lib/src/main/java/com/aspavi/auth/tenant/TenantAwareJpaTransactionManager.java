@@ -41,8 +41,9 @@ import java.sql.SQLException;
  * the right moment.
  *
  * <p>Registered automatically via
- * {@link com.aspavi.auth.config.AspavIAuthAutoConfiguration} as the primary
- * {@code PlatformTransactionManager} bean (replaces the default Spring Boot one).
+ * {@link com.aspavi.auth.config.TenantTransactionManagerAutoConfiguration} as the only
+ * {@code PlatformTransactionManager}, named {@code transactionManager} so that Spring Data
+ * repositories use it too (Spring Boot's own then backs off).
  */
 public class TenantAwareJpaTransactionManager extends JpaTransactionManager {
 

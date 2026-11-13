@@ -1,15 +1,22 @@
 package com.aspavi.auth.tenant;
 
 import com.aspavi.auth.config.AspavIAuthAutoConfiguration;
+import com.aspavi.auth.config.TenantTransactionManagerAutoConfiguration;
+import com.aspavi.auth.tenant.jpa.Item;
+import com.aspavi.auth.tenant.jpa.ItemRepository;
+import com.aspavi.auth.tenant.jpa.JpaTestConfiguration;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.data.jpa.autoconfigure.DataJpaRepositoriesAutoConfiguration;
 import org.springframework.boot.hibernate.autoconfigure.HibernateJpaAutoConfiguration;
 import org.springframework.boot.jdbc.autoconfigure.DataSourceAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
+import org.springframework.boot.transaction.autoconfigure.TransactionAutoConfiguration;
 import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
@@ -73,8 +80,12 @@ class TenantAwareJpaTransactionManagerTest {
     private final ApplicationContextRunner runner = new ApplicationContextRunner()
             .withConfiguration(AutoConfigurations.of(
                     AspavIAuthAutoConfiguration.class,
+                    TenantTransactionManagerAutoConfiguration.class,
                     DataSourceAutoConfiguration.class,
-                    HibernateJpaAutoConfiguration.class))
+                    HibernateJpaAutoConfiguration.class,
+                    DataJpaRepositoriesAutoConfiguration.class,
+                    TransactionAutoConfiguration.class))
+            .withUserConfiguration(JpaTestConfiguration.class)
             .withPropertyValues(
                     "spring.datasource.url=" + POSTGRES.getJdbcUrl(),
                     "spring.datasource.username=" + APP,
@@ -168,6 +179,59 @@ class TenantAwareJpaTransactionManagerTest {
                 .rootCause().hasMessageContaining("new row violates row-level security policy"));
     }
 
+    @Test
+    void theContextHasOneTransactionManagerAndItIsTheTenantAwareOne() {
+        withDatabase(false, db -> {
+            assertThat(db.context().getBeansOfType(PlatformTransactionManager.class)).hasSize(1);
+            // Spring Data repositories look their transaction manager up by this name.
+            assertThat(db.context().getBean("transactionManager")).isSameAs(db.manager());
+        });
+    }
+
+    @Test
+    void aRepositoryCalledWithoutOuterTransactionSeesOnlyItsTenant() {
+        withDatabase(false, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            assertThat(TenantContext.runAs("acme", () -> names(items.findAll())))
+                    .containsExactlyInAnyOrder("acme-1", "acme-2");
+            assertThat(TenantContext.runAs("beta", () -> items.count())).isEqualTo(1);
+        });
+    }
+
+    @Test
+    void aRepositoryWriteWithoutOuterTransactionCarriesTheTenant() {
+        withDatabase(false, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            TenantContext.runAs("delta", () -> items.save(new Item("delta", "delta-1")));
+
+            assertThat(TenantContext.runAs("delta", () -> names(items.findAll()))).containsExactly("delta-1");
+            assertThatThrownBy(() -> TenantContext.runAs("acme", () -> items.saveAndFlush(new Item("delta", "x"))))
+                    .rootCause().hasMessageContaining("new row violates row-level security policy");
+        });
+    }
+
+    @Test
+    void inStrictModeARepositoryCalledWithoutTenantThrows() {
+        withDatabase(true, db -> {
+            ItemRepository items = db.context().getBean(ItemRepository.class);
+
+            // Spring Data's exception translation wraps an IllegalStateException in
+            // InvalidDataAccessApiUsageException; the message and the cause stay.
+            assertThatThrownBy(items::findAll)
+                    .isInstanceOf(InvalidDataAccessApiUsageException.class)
+                    .hasMessageContaining("SimpleJpaRepository.findAll")
+                    .cause().isInstanceOf(MissingTenantException.class);
+            assertThatThrownBy(items::count).hasCauseInstanceOf(MissingTenantException.class);
+            assertThat(TenantContext.runWithoutTenant(() -> items.count())).isZero();
+        });
+    }
+
+    private static List<String> names(List<Item> items) {
+        return items.stream().map(Item::getName).toList();
+    }
+
     private void withDatabase(boolean strict, Consumer<Db> test) {
         runner.withPropertyValues("aspavi.auth.tenant.strict=" + strict).run(context -> {
             assertThat(context).hasNotFailed();
@@ -175,10 +239,11 @@ class TenantAwareJpaTransactionManagerTest {
         });
     }
 
-    private record Db(TenantAwareJpaTransactionManager manager, JdbcTemplate jdbc) {
+    private record Db(ConfigurableApplicationContext context, TenantAwareJpaTransactionManager manager,
+                      JdbcTemplate jdbc) {
 
         Db(ConfigurableApplicationContext context) {
-            this((TenantAwareJpaTransactionManager) context.getBean(PlatformTransactionManager.class),
+            this(context, (TenantAwareJpaTransactionManager) context.getBean(PlatformTransactionManager.class),
                     new JdbcTemplate(context.getBean(javax.sql.DataSource.class)));
         }
 

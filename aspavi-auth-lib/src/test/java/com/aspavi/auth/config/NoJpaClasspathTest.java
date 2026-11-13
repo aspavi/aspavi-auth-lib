@@ -27,7 +27,8 @@ class NoJpaClasspathTest {
     @Test
     void startsWithSecurityBeansAndWithoutTenantAwareTransactionManager() {
         new ApplicationContextRunner()
-                .withConfiguration(AutoConfigurations.of(AspavIAuthAutoConfiguration.class))
+                .withConfiguration(AutoConfigurations.of(
+                        AspavIAuthAutoConfiguration.class, TenantTransactionManagerAutoConfiguration.class))
                 .withPropertyValues("aspavi.auth.tenants.acme=https://kc.example.com/realms/rrhh-tenant-acme")
                 .run(context -> {
                     assertThat(context).hasNotFailed();
@@ -35,6 +36,7 @@ class NoJpaClasspathTest {
                     assertThat(context).hasSingleBean(JwtAuthenticationConverter.class);
                     assertThat(context).hasSingleBean(TenantFilter.class);
                     assertThat(context).doesNotHaveBean("tenantAwareTransactionManager");
+                    assertThat(context).doesNotHaveBean("transactionManager");
                 });
     }
 }
